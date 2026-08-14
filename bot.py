@@ -140,7 +140,6 @@ HELP_TEXT = (
     "<code>/stop</code> - stop the running job after its current batch\n\n"
     "Jobs run one at a time. If the bot's busy, yours is queued automatically.\n\n"
     f"{DIVIDER}\n"
-    "🛠 Made by @AntonysrmNafi"
 )
 
 CHECK_PROMPT_TEXT = (
