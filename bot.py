@@ -144,9 +144,10 @@ HELP_TEXT = (
 
 CHECK_PROMPT_TEXT = (
     "🔎 <b>Check a Proxy</b>\n\n"
-    "Send it as <code>ip:port</code>, optionally followed by the method:\n"
-    "<code>1.2.3.4:8080</code>\n"
-    "<code>1.2.3.4:8080 socks5</code>"
+    "Send it as <code>ip:port</code> (you can pick the method via buttons):\n"
+    "<code>45.144.54.40:1080</code>\n\n"
+    "Or specify the method directly:\n"
+    "<code>45.144.54.40:1080 socks5</code>"
 )
 
 RESTORE_PROMPT_TEXT = (
@@ -276,6 +277,16 @@ def _method_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def _check_proto_keyboard(proxy: str) -> InlineKeyboardMarkup:
+    """Choose proxy type keyboard matching the exact style of Step 1."""
+    row = [InlineKeyboardButton(m.upper(), callback_data=f"chkpr:{m}:{proxy}") for m in ("http", "socks4", "socks5")]
+    return InlineKeyboardMarkup([
+        row,
+        [InlineKeyboardButton("SOCKS (4 + 5)", callback_data=f"chkpr:socks:{proxy}")],
+        [InlineKeyboardButton("‹ Back", callback_data="menu:main")],
+    ])
+
+
 def _country_select_keyboard(method: str) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton("🌍 Random (all countries)", callback_data=f"csel:{method}:ALL")]]
     buttons = [InlineKeyboardButton(c, callback_data=f"csel:{method}:{i}") for i, c in enumerate(TOP_COUNTRIES)]
@@ -336,7 +347,7 @@ async def _safe_edit(bot, chat_id, message_id, text, reply_markup=None):
         except Exception:
             logger.warning("Failed to edit status message in chat %s after flood-control wait", chat_id)
     except Forbidden:
-        pass  # user blocked the bot or left the chat, nothing more we can do
+        pass
 
 
 # ---------- job submission (shared by command args and buttons) ----------
@@ -417,28 +428,40 @@ def _parse_check_input(text: str):
     if not parts or not PROXY_INPUT_RE.match(parts[0]):
         return None
     proxy = parts[0]
-    method = parts[1].lower() if len(parts) > 1 else "http"
-    if method not in VALID_METHODS:
+    method = parts[1].lower() if len(parts) > 1 else None
+    if method and method not in VALID_METHODS:
         return None
     return proxy, method
 
 
-async def _run_check(bot, chat_id: int, proxy: str, method: str):
-    msg = await bot.send_message(chat_id, f"🔎 Checking <code>{html.escape(proxy)}</code>…", parse_mode=ParseMode.HTML)
+async def _run_check(bot, chat_id: int, proxy: str, method: str, message_id: int | None = None):
+    label_method = "SOCKS" if method == "socks" else method.upper()
+    text = f"🔎 Checking <code>{html.escape(proxy)}</code> ({label_method})…"
+    if message_id:
+        await _safe_edit(bot, chat_id, message_id, text)
+        msg_id = message_id
+    else:
+        msg = await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
+        msg_id = msg.message_id
+
     result = await lookup_proxy_details(proxy, method)
-    await _safe_edit(bot, msg.chat_id, msg.message_id, _format_proxy_details(result))
+    await _safe_edit(bot, chat_id, msg_id, _format_proxy_details(result))
 
 
 async def button_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_chat.type != "private":
         await query.answer()
-        return  # this bot only operates in DMs - every button we send is already private-only,
-        # this just makes sure a callback can never do anything if the bot ends up in a group
+        return
 
     await query.answer()
     data = query.data
     chat_id = query.message.chat_id
+
+    if data.startswith("chkpr:"):
+        _, method, proxy = data.split(":", 2)
+        await _run_check(context.bot, chat_id, proxy, method, query.message.message_id)
+        return
 
     if data.startswith("menu:"):
         action = data.split(":", 1)[1]
@@ -615,7 +638,7 @@ async def button_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def restore_document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if chat_id not in pending_restore:
-        return  # not something we're waiting on, ignore
+        return
 
     pending_restore.discard(chat_id)
     document = update.message.document
@@ -669,10 +692,17 @@ async def text_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
         pending_check.discard(chat_id)
         proxy, method = parsed
-        await _run_check(context.bot, chat_id, proxy, method)
-        return
 
-    # not waiting on anything from this chat - ignore stray text
+        if not method:
+            # Show buttons matching Step 1
+            await update.message.reply_text(
+                f"🚀 <b>Check a Proxy</b>\nStep 1 of 1: choose a proxy type for <code>{html.escape(proxy)}</code>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=_check_proto_keyboard(proxy)
+            )
+        else:
+            await _run_check(context.bot, chat_id, proxy, method)
+        return
 
 
 # ---------- background worker ----------
@@ -680,7 +710,7 @@ async def text_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def _on_progress(bot, job: Job, checked, live, total, label: str = "Checking proxies"):
     now = time.monotonic()
     if checked < total and now - job.last_edit_at < PROGRESS_EDIT_MIN_INTERVAL:
-        return  # too soon since the last edit; the next batch (or the final message) will catch up
+        return
     job.last_edit_at = now
 
     bar = _progress_bar(checked, total)
@@ -725,11 +755,6 @@ def _build_summary(live_results, sources_ok, sources_total, elapsed_s, stopped_e
 
 
 def _order_by_source_score(proxies: list, proxy_sources: dict, scores: dict, priority: set | None = None) -> list:
-    """Best-scored sources first (so historically-better sources get checked before the
-    MAX_CHECK_PER_JOB cap potentially cuts the list off). `priority` proxies (e.g. country-boost
-    candidates) always come first regardless of score, since they were fetched specifically to
-    satisfy the request. Unknown/untested sources default to a neutral 0.5, so a brand-new
-    source isn't buried under proven ones nor unfairly favored over them."""
     priority = priority or set()
     head = [p for p in proxies if p in priority]
     tail = [p for p in proxies if p not in priority]
@@ -956,8 +981,6 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, text_input_handler))
     app.add_handler(MessageHandler(filters.Document.ALL & filters.ChatType.PRIVATE, restore_document_handler))
 
-    # Python 3.14 removed implicit event-loop creation (PEP 719); PTB 21.x still calls
-    # asyncio.get_event_loop() internally, so we create one up front if none exists.
     try:
         asyncio.get_event_loop()
     except RuntimeError:
