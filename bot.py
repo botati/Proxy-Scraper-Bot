@@ -51,14 +51,26 @@ PROXY_INPUT_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}:\d{1,5}$")
 DIVIDER = "┄" * 22
 
 TOP_COUNTRIES = [
+    # الدول العربية الأكثر قوة وطلباً
+    "United Arab Emirates", "Egypt", "Saudi Arabia", "Morocco", "Jordan", "Kuwait",
+    
+    # باقي الدول العالمية
     "United States", "United Kingdom", "Germany", "Canada", "Australia",
     "France", "Japan", "Netherlands", "Switzerland", "India",
     "Mexico", "Indonesia", "Brazil", "Singapore", "Russia",
 ]
 
 # Name (as shown on buttons, or typed via CLI) -> ISO 3166-1 alpha-2, for the country-boost fetch.
-# Lowercase keys; common aliases included since CLI usage isn't limited to the button labels.
 COUNTRY_ISO = {
+    # الدول العربية
+    "united arab emirates": "AE", "uae": "AE", "emirates": "AE", "الامارات": "AE", "الإمارات": "AE",
+    "egypt": "EG", "eg": "EG", "مصر": "EG",
+    "saudi arabia": "SA", "saudi": "SA", "ksa": "SA", "السعودية": "SA",
+    "morocco": "MA", "المغرب": "MA",
+    "jordan": "JO", "الاردن": "JO", "الأردن": "JO",
+    "kuwait": "KW", "الكويت": "KW",
+
+    # باقي الدول
     "united states": "US", "usa": "US", "us": "US", "america": "US",
     "united kingdom": "GB", "uk": "GB", "britain": "GB", "england": "GB",
     "germany": "DE", "canada": "CA", "australia": "AU", "france": "FR", "japan": "JP",
@@ -278,7 +290,6 @@ def _method_keyboard() -> InlineKeyboardMarkup:
 
 
 def _check_proto_keyboard(proxy: str) -> InlineKeyboardMarkup:
-    """Choose proxy type keyboard matching the exact style of Step 1."""
     row = [InlineKeyboardButton(m.upper(), callback_data=f"chkpr:{m}:{proxy}") for m in ("http", "socks4", "socks5")]
     return InlineKeyboardMarkup([
         row,
