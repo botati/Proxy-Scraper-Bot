@@ -75,12 +75,13 @@ def _proxy_dict(proxy: str, method: str) -> dict:
 
 
 def _check_one_sync(proxy: str, method: str) -> CheckResult:
-    """Blocking; must only run inside a worker thread (via _executor), never on the event loop.
+    """Blocking; must only run inside a worker thread (via _executor), never on the event loop."""
+    if method == "socks":
+        res = _check_one_sync(proxy, "socks5")
+        if res.is_live:
+            return res
+        return _check_one_sync(proxy, "socks4")
 
-    Two requests through the proxy: a streamed GET to TEST_URL for a pure connect+first-byte
-    timing (body is never downloaded - its size is irrelevant noise for a "ping"), then one
-    more to confirm the proxy is a genuine working exit (and to read its country) before
-    trusting the timing at all."""
     proxies = _proxy_dict(proxy, method)
     session = _session()
 
@@ -95,8 +96,6 @@ def _check_one_sync(proxy: str, method: str) -> CheckResult:
     if ping_ms > CHECK_TIMEOUT * 1000:
         return CheckResult(proxy=proxy, is_live=False)
 
-    # Confirm the proxy actually relayed a working request (not just a fast connect that then
-    # errors on real use) and read its country while we're there.
     try:
         resp = session.get(
             f"{SELF_LOOKUP_URL}?fields=status,country", proxies=proxies, timeout=REQUEST_TIMEOUT
@@ -114,6 +113,12 @@ def _check_one_sync(proxy: str, method: str) -> CheckResult:
 
 def _lookup_details_sync(proxy: str, method: str) -> dict:
     """Blocking; richer on-demand result for the /check command (region/city/isp/org/asn)."""
+    if method == "socks":
+        res = _lookup_details_sync(proxy, "socks5")
+        if res.get("is_live"):
+            return res
+        return _lookup_details_sync(proxy, "socks4")
+
     result = {"proxy": proxy, "method": method, "is_live": False, "ping_ms": None}
     proxies = _proxy_dict(proxy, method)
     session = _session()
@@ -165,13 +170,6 @@ async def check_proxies(proxies, method, stop_event, live_limit, on_progress, pr
     """
     Check `proxies` in batches of CHECK_BATCH_SIZE, each proxy's blocking `requests` call
     running in its own thread (see _executor) so a batch checks concurrently, not one-by-one.
-    `stop_event` (asyncio.Event) is only checked between batches, never mid-batch.
-    `proxy_sources`, if given, maps proxy -> the scrape source it came from (see scraper.py),
-    so per-source live-rate stats can be tracked; proxies not in the map count as "unknown".
-    `on_progress(checked, live, total, dead_batch, live_batch, source_batch)` is awaited after
-    every batch, where dead_batch is proxy strings that failed, live_batch is (proxy, country,
-    ping_ms) tuples that passed, and source_batch is {source: (checked_in_batch, live_in_batch)}.
-    Returns the list of CheckResult for live proxies only, sorted fastest (lowest ping) first.
     """
     proxy_sources = proxy_sources or {}
     live_results: list[CheckResult] = []
