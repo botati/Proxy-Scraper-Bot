@@ -177,8 +177,6 @@ def _build_scrapers():
         GitHubScraper("socks", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/all.txt"),
 
         # Pre-split single-method files, no scheme prefix - plain Scraper (no filtering needed/possible).
-        # NOTE: zloi-user was previously wired through GitHubScraper, whose "method in line" filter silently
-        # dropped every line because these lines have no scheme text in them - fixed to yield proxies again.
         Scraper("https", "https://raw.githubusercontent.com/zloi-user/hideip.me/main/https.txt"),
         Scraper("http", "https://raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt"),
         Scraper("socks4", "https://raw.githubusercontent.com/zloi-user/hideip.me/main/socks4.txt"),
@@ -269,36 +267,62 @@ async def scrape_all(method: str):
 
 async def scrape_country_boost(method: str, iso_code: str) -> list:
     """
-    Best-effort EXTRA proxies for one specific country (ISO 3166-1 alpha-2, e.g. "US").
-    The general pool from scrape_all() is unfiltered and now huge (100k+), so a country
-    filter applied only after checking a random sample can easily come back empty even
-    for common countries - this fetches candidates that are already known/likely to be
-    in that country, so they actually get checked. Failures here are non-fatal; callers
-    still have the general pool as a fallback.
+    Best-effort EXTRA proxies for one specific country (ISO 3166-1 alpha-2, e.g. "US", "EG", "AE").
     """
     methods = [method] + (["socks4", "socks5"] if method == "socks" else [])
     results = set()
+    iso = iso_code.upper()
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=SCRAPE_TIMEOUT) as client:
-        # monosans' geo-tagged JSON, filtered client-side by real geolocation data
-        try:
-            resp = await client.get("https://raw.githubusercontent.com/monosans/proxy-list/main/proxies.json")
-            for e in resp.json():
-                country = (e.get("geolocation") or {}).get("country") or {}
-                if e.get("protocol") in methods and country.get("iso_code") == iso_code and e.get("host"):
-                    results.add(f"{e['host']}:{e['port']}")
-        except Exception:
-            logger.debug("Country-boost monosans fetch failed for %s", iso_code)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
 
-        # ProxyScrape's own per-country filter, one call per protocol variant needed
+    async with httpx.AsyncClient(follow_redirects=True, timeout=SCRAPE_TIMEOUT, headers=headers) as client:
+        # 1. GeoNode API (أقوى مصدر مجاني يدعم الفلترة بالـ ISO بدقة عالية)
         for m in methods:
             try:
-                resp = await client.get(
-                    "https://api.proxyscrape.com/?request=getproxies"
-                    f"&proxytype={m}&timeout=2000&country={iso_code}"
-                )
-                results.update(PROXY_PATTERN.findall(resp.text))
+                geonode_proto = "socks5" if m == "socks5" else ("socks4" if m == "socks4" else "http,https")
+                url = f"https://proxylist.geonode.com/api/proxy-list?country={iso}&protocols={geonode_proto}&limit=100&page=1&sort_by=lastChecked&sort_type=desc"
+                resp = await client.get(url)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for item in data.get("data", []):
+                        if item.get("ip") and item.get("port"):
+                            results.add(f"{item['ip']}:{item['port']}")
             except Exception:
-                logger.debug("Country-boost proxyscrape fetch failed for %s/%s", m, iso_code)
+                logger.debug("GeoNode country boost failed for %s/%s", m, iso)
+
+        # 2. monosans' geo-tagged JSON
+        try:
+            resp = await client.get("https://raw.githubusercontent.com/monosans/proxy-list/main/proxies.json")
+            if resp.status_code == 200:
+                for e in resp.json():
+                    country = (e.get("geolocation") or {}).get("country") or {}
+                    if e.get("protocol") in methods and country.get("iso_code") == iso and e.get("host"):
+                        results.add(f"{e['host']}:{e['port']}")
+        except Exception:
+            logger.debug("Country-boost monosans fetch failed for %s", iso)
+
+        # 3. Proxyscrape v2 API الحديث
+        for m in methods:
+            try:
+                ps_proto = "socks5" if m == "socks5" else ("socks4" if m == "socks4" else "http")
+                url = f"https://api.proxyscrape.com/v2/?request=displayproxies&protocol={ps_proto}&timeout=5000&country={iso}&ssl=all&anonymity=all"
+                resp = await client.get(url)
+                if resp.status_code == 200:
+                    results.update(PROXY_PATTERN.findall(resp.text))
+            except Exception:
+                logger.debug("Country-boost proxyscrape v2 fetch failed for %s/%s", m, iso)
+
+        # 4. Proxy-List.download API
+        for m in methods:
+            try:
+                pld_type = "socks5" if m == "socks5" else ("socks4" if m == "socks4" else "http")
+                url = f"https://www.proxy-list.download/api/v1/get?type={pld_type}&country={iso}"
+                resp = await client.get(url)
+                if resp.status_code == 200:
+                    results.update(PROXY_PATTERN.findall(resp.text))
+            except Exception:
+                logger.debug("Proxy-List.download country boost failed for %s/%s", m, iso)
 
     return list(results)
